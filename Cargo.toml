@@ -1,0 +1,13 @@
+[package]
+name = "slime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = { version = "1.13.1", features = ["bytemuck_derive", "derive"] }
+env_logger = "0.10.0"
+itertools = "0.10.5"
+log = "0.4.17"
+pollster = "0.3.0"
+wgpu = { version = "0.15.1", features = ["vulkan-portability"] }
+winit = "0.28.3"
