@@ -11,9 +11,9 @@ use bevy::{
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
             BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
-            CachedComputePipelineId, ComputePassDescriptor, ComputePipeline,
-            ComputePipelineDescriptor, Extent3d, ImageSubresourceRange, PipelineCache,
-            ShaderStages, StorageTextureAccess, TextureAspect, TextureFormat, TextureSampleType,
+            BufferBindingType, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
+            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, PipelineCache,
+            ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType,
             TextureViewDimension,
         },
         renderer::RenderDevice,
@@ -60,6 +60,31 @@ impl FromWorld for TexturesBindGroupLayout {
     }
 }
 
+#[derive(Resource, Deref, DerefMut)]
+struct DirectionBindGroupLayout(BindGroupLayout);
+
+impl FromWorld for DirectionBindGroupLayout {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource::<RenderDevice>();
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: "DirectionBindGroupLayout".into(),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(
+                        (std::mem::size_of::<IVec2>() as u64).try_into().unwrap(),
+                    ),
+                },
+                count: None,
+            }],
+        });
+        Self(layout)
+    }
+}
+
 #[derive(Resource)]
 struct TexturesBindGroups {
     primary: BindGroup,
@@ -96,6 +121,54 @@ fn render_queue_textures_bind_group(
 }
 
 #[derive(Resource)]
+struct DirectionBindGroups {
+    horizontal: BindGroup,
+    vertical: BindGroup,
+}
+
+impl FromWorld for DirectionBindGroups {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource::<RenderDevice>();
+        let layout = world.resource::<DirectionBindGroupLayout>();
+
+        let vertical = device.create_bind_group(&BindGroupDescriptor {
+            label: "DirectionBindGroups_vertical".into(),
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: device
+                    .create_buffer_with_data(&BufferInitDescriptor {
+                        label: "IVec2{x: 0, y: 1}".into(),
+                        contents: bytemuck::bytes_of(&IVec2::new(0, 1)),
+                        usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+                    })
+                    .as_entire_binding(),
+            }],
+        });
+
+        let horizontal = device.create_bind_group(&BindGroupDescriptor {
+            label: "DirectionBindGroups_horizontal".into(),
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: device
+                    .create_buffer_with_data(&BufferInitDescriptor {
+                        label: "IVec2{x: 1, y: 0}".into(),
+                        contents: bytemuck::bytes_of(&IVec2::new(1, 0)),
+                        usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+                    })
+                    .as_entire_binding(),
+            }],
+        });
+
+        Self {
+            horizontal,
+            vertical,
+        }
+    }
+}
+
+#[derive(Resource)]
 enum Pipelines {
     Pending {
         init: CachedComputePipelineId,
@@ -116,6 +189,7 @@ fn render_queue_prepare_pipelines(
     pipelines: Option<Res<Pipelines>>,
     agents_bind_group_layout: Res<AgentsBindGroupLayout>,
     textures_bind_group_layout: Res<TexturesBindGroupLayout>,
+    direction_bind_group_layout: Res<DirectionBindGroupLayout>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -132,7 +206,7 @@ fn render_queue_prepare_pipelines(
                 entry_point: "init".into(),
             });
 
-            let layout = vec![
+            let mut layout = vec![
                 agents_bind_group_layout.deref().deref().clone(),
                 textures_bind_group_layout.deref().deref().clone(),
             ];
@@ -154,6 +228,8 @@ fn render_queue_prepare_pipelines(
                 shader_defs: vec![],
                 entry_point: "project".into(),
             });
+
+            layout.push(direction_bind_group_layout.deref().deref().clone());
 
             let blur = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("[SimulationPipelines] blur".into()),
@@ -236,8 +312,10 @@ impl render_graph::Node for Simulation {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some(&format!("simulation (species): {:?} ({})", id, so.name)),
                 });
+
                 pass.set_bind_group(0, bg, &[]);
-                pass.set_bind_group(1, primary, &[]); // unused
+                pass.set_bind_group(1, primary, &[]);
+
                 if sp.contains::<Uninitialized>() {
                     // initialize agents
                     pass.set_pipeline(init);
@@ -245,28 +323,42 @@ impl render_graph::Node for Simulation {
                     // update agents
                     pass.set_pipeline(update);
                 }
-
-                // project the agents onto the secondary buffer
                 pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
+
+                // project the agents onto the primary buffer
+                pass.set_bind_group(1, secondary, &[]);
                 pass.set_pipeline(project);
                 pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
 
-                // apply blur pass from secondary, overwriting primary
-                pass.set_bind_group(1, secondary, &[]);
+                let DirectionBindGroups {
+                    horizontal,
+                    vertical,
+                } = &world.resource::<_>();
+
                 pass.set_pipeline(blur);
+
+                // apply first blur pass to primary onto secondary
+                pass.set_bind_group(1, primary, &[]);
+                pass.set_bind_group(2, horizontal, &[]);
+                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
+
+                // apply second blur pass to secondary onto primary
+                pass.set_bind_group(1, secondary, &[]);
+                pass.set_bind_group(2, vertical, &[]);
                 pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
             }
 
-            let gpu_images = world.resource::<RenderAssets<Image>>();
-            let secondary = &gpu_images[world.resource::<SecondaryFramebuffer>().deref()];
-            let range_all = ImageSubresourceRange {
-                aspect: TextureAspect::All,
-                base_mip_level: 0,
-                mip_level_count: secondary.mip_level_count.try_into().ok(),
-                base_array_layer: 0,
-                array_layer_count: None,
-            };
-            encoder.clear_texture(&secondary.texture, &range_all);
+            // no need to clear?
+
+            // let gpu_images = world.resource::<RenderAssets<Image>>();
+            // let secondary = &gpu_images[world.resource::<SecondaryFramebuffer>().deref()];
+            // let range_all = ImageSubresourceRange {
+            //     aspect: TextureAspect::All,
+            //     base_mip_level: 0,
+            //     mip_level_count: secondary.mip_level_count.try_into().ok(),
+            //     base_array_layer: 0,
+            //     array_layer_count: None,
+            // };
         }
         Ok(())
     }
@@ -278,11 +370,13 @@ impl bevy::app::Plugin for Plugin {
     fn build(&self, app: &mut App) {
         {
             let render_app = app.sub_app_mut(RenderApp);
-            render_app.init_resource::<TexturesBindGroupLayout>();
-            render_app.init_resource::<AgentsBindGroupLayout>();
-
-            render_app.add_system(render_queue_prepare_pipelines.in_set(RenderSet::Queue));
-            render_app.add_system(render_queue_textures_bind_group.in_set(RenderSet::Queue));
+            render_app
+                .init_resource::<TexturesBindGroupLayout>()
+                .init_resource::<AgentsBindGroupLayout>()
+                .init_resource::<DirectionBindGroupLayout>()
+                .init_resource::<DirectionBindGroups>()
+                .add_system(render_queue_prepare_pipelines.in_set(RenderSet::Queue))
+                .add_system(render_queue_textures_bind_group.in_set(RenderSet::Queue));
 
             let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
             // Add the compute step to the render pipeline.

@@ -6,16 +6,15 @@ pub mod species;
 use bevy::{
     prelude::*,
     render::{
-        extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
-        RenderApp, RenderSet,
     },
 };
 
-const SIZE: UVec2 = UVec2::new(1000, 1000);
+const SIZE: UVec2 = UVec2::new(100, 100);
 
 #[derive(Resource, Clone, Deref, DerefMut, ExtractResource)]
+
 /// Represents the two alternating framebuffer.
 pub struct Framebuffers([Handle<Image>; 2]);
 

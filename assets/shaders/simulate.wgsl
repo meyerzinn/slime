@@ -114,17 +114,13 @@ var<private> BLUR_COEFFS: array<f32, 33> = array<f32, 33>(
 	0.012318109844189502
 );
 
-fn compute_blur(at: vec2<u32>, dims: vec2<u32>) -> vec4<f32> {
-  let lower = vec2<i32>(0);
-  let upper = vec2<i32>(dims - 1u);
-  var sum = vec3<f32>(0.0);
-  for (var i = 0u; i < 33u; i++) {
-    for (var j = 0u; j < 33u; j++) {
-      let coords = vec2<u32>(clamp(vec2<i32>(at) + vec2<i32>(i32(i) - 16, i32(j) - 16), lower, upper));
-      sum += BLUR_COEFFS[i] * BLUR_COEFFS[j] * textureLoad(t_trails_prev, coords, 0).rgb;
-    }
-  }
-  return vec4<f32>(sum, 1.0);
+
+@group(2) @binding(0)
+var<uniform> direction: vec2<i32>;
+
+fn compute_blur(at: vec2<i32>) -> vec4<f32> {
+  let dims = textureDimensions(t_trails_prev);
+
 }
 
 @compute
@@ -134,19 +130,27 @@ fn blur(@builtin(local_invocation_index) local_id: u32,
         @builtin(num_workgroups) num_workgroups: vec3<u32>)
 {
   let dims = vec2<u32>(textureDimensions(t_trails_prev));
-  let total_pixels = dims.x * dims.y; 
-  let total_kernels = num_workgroups.x * num_workgroups.y * num_workgroups.z;
-  let pixels_per_kernel = (total_pixels + (total_kernels - 1u)) / total_kernels;
+  let total_pixels: u32 = dims.x * dims.y; 
+  let total_kernels: u32 = num_workgroups.x * num_workgroups.y * num_workgroups.z;
+  let pixels_per_kernel: u32 = (total_pixels + (total_kernels - 1u)) / total_kernels;
 
   var count = 0u;
-  let start = pixels_per_kernel * local_id;
-  var x = start / dims.x;
-  var y = start - (x * dims.x);
+  let start: u32 = pixels_per_kernel * local_id;
+  var x: u32 = start / dims.x;
+  var y: u32 = start - (x * dims.x);
   while (count < pixels_per_kernel) {
-    count++;
     let coords = vec2<u32>(x, y);
-    let color = compute_blur(coords, dims);
-    textureStore(t_trails_next, coords, color);
+    let lower = vec2<i32>(0);
+    let upper = vec2<i32>(dims - 1u);
+    var color = vec3<f32>(0.0);
+    for (var i = 0; i < 33; i++) {
+      let tc = clamp(vec2<i32>(coords) + direction * (i - 16), vec2<i32>(0), vec2<i32>(dims - 1u));
+      color += BLUR_COEFFS[i] * textureLoad(t_trails_prev, tc, 0).rgb;
+    }
+    textureStore(t_trails_next, coords, vec4<f32>(color, 1.0));
+
+    // update indices
+    count++;
     y++;
     if (y >= dims.y) {
       y = 0u;
