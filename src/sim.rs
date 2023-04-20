@@ -1,24 +1,26 @@
-use std::ops::Deref;
-
-use crate::species::{
-    AgentsBindGroup, AgentsBindGroupLayout, SpeciesId, SpeciesOptions, Uninitialized,
+use crate::{
+    species::{AgentsBindGroup, AgentsBindGroupLayout, SpeciesId, SpeciesOptions, Uninitialized},
+    SecondaryFramebuffer,
 };
 use bevy::{
     prelude::*,
     render::{
+        main_graph::node::CAMERA_DRIVER,
         render_asset::RenderAssets,
         render_graph::{self, RenderGraph},
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
             BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
-            CachedComputePipelineId, CachedPipelineState, ComputePassDescriptor,
-            ComputePipelineDescriptor, PipelineCache, ShaderStages, StorageTextureAccess,
-            TextureFormat, TextureSampleType, TextureViewDimension,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipeline,
+            ComputePipelineDescriptor, Extent3d, ImageSubresourceRange, PipelineCache,
+            ShaderStages, StorageTextureAccess, TextureAspect, TextureFormat, TextureSampleType,
+            TextureViewDimension,
         },
         renderer::RenderDevice,
         RenderApp, RenderSet,
     },
 };
+use std::ops::Deref;
 
 const SIMULATION: &'static str = "simulation";
 const WORKGROUPS: UVec3 = UVec3::new(256, 1, 1);
@@ -58,8 +60,11 @@ impl FromWorld for TexturesBindGroupLayout {
     }
 }
 
-#[derive(Resource, Deref, DerefMut)]
-struct TexturesBindGroup(BindGroup);
+#[derive(Resource)]
+struct TexturesBindGroups {
+    primary: BindGroup,
+    secondary: BindGroup,
+}
 
 fn render_queue_textures_bind_group(
     mut commands: Commands,
@@ -71,186 +76,197 @@ fn render_queue_textures_bind_group(
 ) {
     let primary = &gpu_images[&primary].texture_view;
     let secondary = &gpu_images[&secondary].texture_view;
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: "simulate::TexturesBindGroup".into(),
-        layout: &layout,
-        entries: &[
-            BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::TextureView(primary),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: BindingResource::TextureView(secondary),
-            },
-        ],
+    let [primary, secondary] = [0, 1].map(|i| {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some(&format!("simulate::TexturesBindGroup_{}", i)),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: i,
+                    resource: BindingResource::TextureView(primary),
+                },
+                BindGroupEntry {
+                    binding: 1 - i,
+                    resource: BindingResource::TextureView(secondary),
+                },
+            ],
+        })
     });
-    commands.insert_resource(TexturesBindGroup(bind_group));
+    commands.insert_resource(TexturesBindGroups { primary, secondary });
 }
 
 #[derive(Resource)]
-struct SimulationPipelines {
-    init_pipeline: CachedComputePipelineId,
-    update_pipeline: CachedComputePipelineId,
-    project_pipeline: CachedComputePipelineId,
+enum Pipelines {
+    Pending {
+        init: CachedComputePipelineId,
+        update: CachedComputePipelineId,
+        project: CachedComputePipelineId,
+        blur: CachedComputePipelineId,
+    },
+    Cached {
+        init: ComputePipeline,
+        update: ComputePipeline,
+        project: ComputePipeline,
+        blur: ComputePipeline,
+    },
 }
 
-impl FromWorld for SimulationPipelines {
-    fn from_world(world: &mut World) -> Self {
-        let agents_bind_group_layout = world.resource::<AgentsBindGroupLayout>();
-        let textures_bind_group_layout = world.resource::<TexturesBindGroupLayout>();
+fn render_queue_prepare_pipelines(
+    mut commands: Commands,
+    pipelines: Option<Res<Pipelines>>,
+    agents_bind_group_layout: Res<AgentsBindGroupLayout>,
+    textures_bind_group_layout: Res<TexturesBindGroupLayout>,
+    asset_server: Res<AssetServer>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    match pipelines {
+        None => {
+            let shader = asset_server.load("shaders/simulate.wgsl");
 
-        let shader = world
-            .resource::<AssetServer>()
-            .load("shaders/simulate.wgsl");
+            let init = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("[SimulationPipelines] init_pipeline".into()),
+                layout: vec![agents_bind_group_layout.deref().deref().clone()],
+                push_constant_ranges: Vec::new(),
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: "init".into(),
+            });
 
-        let pipeline_cache = world.resource::<PipelineCache>();
+            let layout = vec![
+                agents_bind_group_layout.deref().deref().clone(),
+                textures_bind_group_layout.deref().deref().clone(),
+            ];
 
-        let init_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("[SimulationPipelines] init_pipeline".into()),
-            layout: vec![
-                agents_bind_group_layout.deref().clone(),
-                // textures_bind_group_layout.deref().clone(), // unused
-            ],
-            push_constant_ranges: Vec::new(),
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: "init".into(),
-        });
+            let update = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("[SimulationPipelines] update".into()),
+                layout: layout.clone(),
+                push_constant_ranges: Vec::new(),
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: "update".into(),
+            });
 
-        let update_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("[SimulationPipelines] update_pipeline".into()),
-            layout: vec![
-                agents_bind_group_layout.deref().clone(),
-                textures_bind_group_layout.deref().clone(),
-            ],
-            push_constant_ranges: Vec::new(),
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: "update".into(),
-        });
+            let project = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("[SimulationPipelines] project".into()),
+                layout: layout.clone(),
+                push_constant_ranges: Vec::new(),
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: "project".into(),
+            });
 
-        let project_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("[SimulationPipelines] project_pipeline".into()),
-            layout: vec![
-                agents_bind_group_layout.deref().clone(),
-                textures_bind_group_layout.deref().clone(),
-            ],
-            push_constant_ranges: Vec::new(),
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: "project".into(),
-        });
+            let blur = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("[SimulationPipelines] blur".into()),
+                layout: layout.clone(),
+                push_constant_ranges: Vec::new(),
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: "blur".into(),
+            });
 
-        Self {
-            init_pipeline,
-            update_pipeline,
-            project_pipeline,
+            commands.insert_resource(Pipelines::Pending {
+                init,
+                update,
+                project,
+                blur,
+            })
         }
+        Some(res) => match *res.deref() {
+            Pipelines::Pending {
+                init,
+                update,
+                project,
+                blur,
+            } => {
+                match (
+                    pipeline_cache.get_compute_pipeline(init),
+                    pipeline_cache.get_compute_pipeline(update),
+                    pipeline_cache.get_compute_pipeline(project),
+                    pipeline_cache.get_compute_pipeline(blur),
+                ) {
+                    (Some(init), Some(update), Some(project), Some(blur)) => commands
+                        .insert_resource(Pipelines::Cached {
+                            init: init.clone(),
+                            update: update.clone(),
+                            project: project.clone(),
+                            blur: blur.clone(),
+                        }),
+                    _ => { /* pipelines are still pending */ }
+                }
+            }
+            Pipelines::Cached { .. } => { /* pipelines already valid */ }
+        },
     }
 }
 
-#[derive(Default)]
-enum Simulation {
-    #[default]
-    LoadingInitializationPipeline,
-    LoadingUpdatePipeline,
-    LoadingProjectPipeline,
-    Running,
-}
+struct Simulation;
 
 impl render_graph::Node for Simulation {
-    fn update(&mut self, world: &mut World) {
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pipelines = world.resource::<SimulationPipelines>();
-
-        match self {
-            Self::LoadingInitializationPipeline => {
-                if let CachedPipelineState::Ok(_) =
-                    pipeline_cache.get_compute_pipeline_state(pipelines.init_pipeline)
-                {
-                    // initialization pipeline is cached, now we can load the update pipeline
-                    *self = Self::LoadingUpdatePipeline;
-                }
-            }
-            Self::LoadingUpdatePipeline => {
-                if let CachedPipelineState::Ok(_) =
-                    pipeline_cache.get_compute_pipeline_state(pipelines.update_pipeline)
-                {
-                    // update pipeline is cached, we can now advance to the update stage
-                    *self = Self::LoadingProjectPipeline;
-                }
-            }
-            Self::LoadingProjectPipeline => {
-                if let CachedPipelineState::Ok(_) =
-                    pipeline_cache.get_compute_pipeline_state(pipelines.project_pipeline)
-                {
-                    // project pipeline is cached, we can now advance
-                    *self = Self::Running;
-                }
-            }
-            // advance to the next tick
-            Self::Running => {}
-        }
-    }
-
     fn run(
         &self,
         _graph: &mut render_graph::RenderGraphContext,
         render_context: &mut bevy::render::renderer::RenderContext,
         world: &World,
     ) -> Result<(), render_graph::NodeRunError> {
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pipelines = world.resource::<SimulationPipelines>();
-        let textures_bind_group = &world.resource::<TexturesBindGroup>();
+        if let Some(Pipelines::Cached {
+            init,
+            update,
+            project,
+            blur,
+        }) = world.get_resource::<Pipelines>()
+        {
+            // pipelines are created & cached
+            let TexturesBindGroups { primary, secondary } = world.resource::<TexturesBindGroups>();
 
-        let init_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.init_pipeline)
-            .unwrap();
+            let species: Vec<_> = world
+                .iter_entities()
+                .filter(|e| {
+                    e.contains::<SpeciesId>()
+                        && e.contains::<SpeciesOptions>()
+                        && e.contains::<AgentsBindGroup>()
+                })
+                .collect();
 
-        let update_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.update_pipeline)
-            .unwrap();
+            let encoder = render_context.command_encoder();
 
-        let project_pipeline = pipeline_cache
-            .get_compute_pipeline(pipelines.project_pipeline)
-            .unwrap();
+            for sp in species {
+                let id = sp.get::<SpeciesId>().unwrap();
+                let so = sp.get::<SpeciesOptions>().unwrap();
+                let bg = sp.get::<AgentsBindGroup>().unwrap();
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some(&format!("simulation (species): {:?} ({})", id, so.name)),
+                });
+                pass.set_bind_group(0, bg, &[]);
+                pass.set_bind_group(1, primary, &[]); // unused
+                if sp.contains::<Uninitialized>() {
+                    // initialize agents
+                    pass.set_pipeline(init);
+                } else {
+                    // update agents
+                    pass.set_pipeline(update);
+                }
 
-        let species: Vec<_> = world
-            .iter_entities()
-            .filter(|e| {
-                e.contains::<SpeciesId>()
-                    && e.contains::<SpeciesOptions>()
-                    && e.contains::<AgentsBindGroup>()
-            })
-            .collect();
+                // project the agents onto the secondary buffer
+                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
+                pass.set_pipeline(project);
+                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
 
-        let encoder = render_context.command_encoder();
-
-        for sp in species {
-            let id = sp.get::<SpeciesId>().unwrap();
-            let so = sp.get::<SpeciesOptions>().unwrap();
-            let bg = sp.get::<AgentsBindGroup>().unwrap();
-            let mut first_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some(&format!("first pass: {:?} ({})", id, so.name)),
-            });
-            first_pass.set_bind_group(0, bg, &[]);
-            first_pass.set_bind_group(1, textures_bind_group, &[]); // unused
-            if sp.contains::<Uninitialized>() {
-                // initialize agents
-                first_pass.set_pipeline(init_pipeline);
-            } else {
-                // update agents
-                first_pass.set_pipeline(update_pipeline);
+                // apply blur pass from secondary, overwriting primary
+                pass.set_bind_group(1, secondary, &[]);
+                pass.set_pipeline(blur);
+                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
             }
-            first_pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
-            first_pass.set_pipeline(&project_pipeline);
-            first_pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
 
-            // let mut second_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            //     label: Some(&format!("project pass: {:?} ({})", id, so.name)),
-            // });
-            // second_pass.set_bind_group(0, bind_group, offsets)
+            let gpu_images = world.resource::<RenderAssets<Image>>();
+            let secondary = &gpu_images[world.resource::<SecondaryFramebuffer>().deref()];
+            let range_all = ImageSubresourceRange {
+                aspect: TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: secondary.mip_level_count.try_into().ok(),
+                base_array_layer: 0,
+                array_layer_count: None,
+            };
+            encoder.clear_texture(&secondary.texture, &range_all);
         }
         Ok(())
     }
@@ -264,15 +280,16 @@ impl bevy::app::Plugin for Plugin {
             let render_app = app.sub_app_mut(RenderApp);
             render_app.init_resource::<TexturesBindGroupLayout>();
             render_app.init_resource::<AgentsBindGroupLayout>();
-            render_app.init_resource::<SimulationPipelines>();
+
+            render_app.add_system(render_queue_prepare_pipelines.in_set(RenderSet::Queue));
             render_app.add_system(render_queue_textures_bind_group.in_set(RenderSet::Queue));
 
             let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
             // Add the compute step to the render pipeline.
             // add a node to the render graph for the simulation
-            render_graph.add_node(SIMULATION, Simulation::default());
+            render_graph.add_node(SIMULATION, Simulation);
             // make sure the simulator runs before project
-            render_graph.add_node_edge(SIMULATION, super::blur::BLUR);
+            render_graph.add_node_edge(SIMULATION, CAMERA_DRIVER);
         }
     }
 }
