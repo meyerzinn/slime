@@ -4,76 +4,106 @@ use bevy::{
         render_asset::RenderAssets,
         render_graph::{self, RenderGraph},
         render_resource::{
-            BlendComponent, BlendState, CachedPipelineState, CachedRenderPipelineId,
-            ColorTargetState, ColorWrites, Face, FragmentState, FrontFace, LoadOp,
-            MultisampleState, Operations, PipelineCache, PolygonMode, PrimitiveState,
-            PrimitiveTopology, RenderPassColorAttachment, RenderPassDescriptor,
-            RenderPipelineDescriptor, VertexState,
+            BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+            BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
+            CachedPipelineState, CachedRenderPipelineId, ColorTargetState, ColorWrites, Face,
+            FragmentState, FrontFace, LoadOp, MultisampleState, Operations, PipelineCache,
+            PolygonMode, PrimitiveState, PrimitiveTopology, RenderPassColorAttachment,
+            RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, TextureSampleType,
+            TextureViewDimension, VertexState,
         },
-        RenderApp,
+        renderer::RenderDevice,
+        RenderApp, RenderSet,
     },
 };
 
-pub const PROJECT: &'static str = "project";
+pub const BLUR: &'static str = "blur";
+
+#[derive(Resource, Deref)]
+struct TextureBindGroupLayout(BindGroupLayout);
+
+impl FromWorld for TextureBindGroupLayout {
+    fn from_world(world: &mut World) -> Self {
+        let device = world.resource::<RenderDevice>();
+        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("blur::TextureBindGroupLayout"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        Self(bind_group_layout)
+    }
+}
+
+#[derive(Resource, Deref, DerefMut)]
+struct TextureBindGroup(BindGroup);
+
+fn render_queue_texture_bind_group(
+    mut commands: Commands,
+    layout: Res<TextureBindGroupLayout>,
+    device: Res<RenderDevice>,
+    target: Res<super::PrimaryFramebuffer>,
+    gpu_images: Res<RenderAssets<Image>>,
+) {
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: "blur::render_queue_texture_bind_group".into(),
+        layout: &layout,
+        entries: &[BindGroupEntry {
+            binding: 0,
+            resource: BindingResource::TextureView(&gpu_images[&target].texture_view.clone()),
+        }],
+    });
+    commands.insert_resource(TextureBindGroup(bind_group));
+}
 
 #[derive(Resource)]
 struct Pipeline {
     render_pipeline: CachedRenderPipelineId,
 }
 
-// impl FromWorld for Pipeline {
-//     fn from_world(world: &mut bevy::prelude::World) -> Self {
-
-//     }
-// }
-
 #[derive(Default)]
-enum Projection {
+enum BlurPass {
     #[default]
     WaitingForImages,
     Loading,
-    Running,
+    Rendering(bool), // boolean represents whether there has been an update since the last draw
 }
 
-impl Projection {
-    fn is_running(&self) -> bool {
+impl BlurPass {
+    fn should_draw(&self) -> bool {
         match self {
-            Projection::Running => true,
+            Self::Rendering(true) => true,
             _ => false,
         }
     }
 }
 
-// fn setup(
-//     mut commands: Commands,
-//     images: Res<super::TrailImages>,
-//     gpu_images: Res<RenderAssets<Image>>,
-//     textures_bind_group_layout: Res<super::TexturesBindGroupLayout>,
-//     asset_server: Res<AssetServer>,
-//     pipeline_cache: Res<PipelineCache>,
-// ) {
-
-// }
-
-impl render_graph::Node for Projection {
+impl render_graph::Node for BlurPass {
     fn update(&mut self, world: &mut bevy::prelude::World) {
         let pipeline_cache = world.resource::<PipelineCache>();
-        let textures_bind_group_layout = world.resource::<super::TexturesBindGroupLayout>();
+        let texture_bind_group_layout = world.resource::<TextureBindGroupLayout>();
 
         match self {
             Self::WaitingForImages => {
-                if let Some(images) = world.get_resource::<super::TrailImages>() {
+                if let Some(images) = world.get_resource::<super::Framebuffers>() {
                     let format = world.resource::<RenderAssets<Image>>()[&images[0]].texture_format;
 
-                    let shader = world.resource::<AssetServer>().load("shaders/project.wgsl");
+                    let shader = world.resource::<AssetServer>().load("shaders/blur.wgsl");
 
                     let render_pipeline =
                         pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-                            label: Some("[ProjectPipeline] render_pipeline".into()),
+                            label: Some("[BlurPassPipeline] render_pipeline".into()),
                             layout: vec![
                                 // @todo: need to split this into two different bindings?
-                                // or make a totally separate binding for project
-                                textures_bind_group_layout.0.clone(), // unused
+                                // or make a totally separate binding for blur
+                                texture_bind_group_layout.0.clone(), // unused
                             ],
                             push_constant_ranges: Vec::new(),
                             vertex: VertexState {
@@ -119,11 +149,11 @@ impl render_graph::Node for Projection {
                     pipeline_cache.get_render_pipeline_state(pipeline.render_pipeline)
                 {
                     // pipeline is cached, we're ready to roll!
-                    *self = Self::Running;
+                    *self = Self::Rendering(true);
                 }
             }
 
-            Self::Running => { /*no updates needed */ }
+            Self::Rendering(_) => *self = Self::Rendering(true),
         }
     }
 
@@ -133,7 +163,7 @@ impl render_graph::Node for Projection {
         render_context: &mut bevy::render::renderer::RenderContext,
         world: &bevy::prelude::World,
     ) -> Result<(), render_graph::NodeRunError> {
-        if !self.is_running() {
+        if !self.should_draw() {
             return Ok(());
         }
 
@@ -144,13 +174,12 @@ impl render_graph::Node for Projection {
             .unwrap();
 
         let gpu_images = world.resource::<RenderAssets<Image>>();
-        let textures = world.resource::<super::TrailImages>();
-        let view = &gpu_images[&textures[0]].texture_view;
-
-        let trail_bind_groups = world.resource::<super::TrailBindGroups>();
+        let secondary = world.resource::<super::SecondaryFramebuffer>();
+        let view = &gpu_images[&secondary].texture_view;
+        let bind_group = world.resource::<TextureBindGroup>();
 
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-            label: Some("[ProjectionState] pass"),
+            label: Some("[BlurPassState] pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view,
                 resolve_target: None,
@@ -162,7 +191,8 @@ impl render_graph::Node for Projection {
             depth_stencil_attachment: None,
         });
 
-        // pass.set_bind_group(0, &trail_bind_groups[0], &[]);
+        pass.set_bind_group(0, bind_group, &[]);
+
         pass.set_render_pipeline(render_pipeline);
         pass.draw(0..4, 0..1);
 
@@ -176,12 +206,15 @@ impl bevy::app::Plugin for Plugin {
     fn build(&self, app: &mut App) {
         {
             let render_app = app.sub_app_mut(RenderApp);
+            render_app.init_resource::<TextureBindGroupLayout>();
+            render_app.add_system(render_queue_texture_bind_group.in_set(RenderSet::Queue));
+
             let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
             // Add the compute step to the render pipeline.
             // add a node to the render graph for the simulation
-            render_graph.add_node(PROJECT, Projection::default());
-            // make sure project runs before the camera
-            render_graph.add_node_edge(PROJECT, bevy::render::main_graph::node::CAMERA_DRIVER);
+            render_graph.add_node(BLUR, BlurPass::default());
+            // make sure blur runs before the camera
+            render_graph.add_node_edge(BLUR, bevy::render::main_graph::node::CAMERA_DRIVER);
         }
     }
 }

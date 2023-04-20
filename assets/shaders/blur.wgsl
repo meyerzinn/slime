@@ -40,7 +40,13 @@ fn vs_main(
     return out;
 }
 
+@group(0) @binding(0)
+var t_trails_prev: texture_2d<f32>;
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<u32> {
-    return vec4<u32>(0xFFFFFFFFu, 0u, 0u, 0xFFFFFFFFu);
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(t_trails_prev));
+    let coords = vec2<u32>(clamp(in.uv * dims, vec2<f32>(0.0), dims));
+
+    return textureLoad(t_trails_prev, coords, 0);
 }
