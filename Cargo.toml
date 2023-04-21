@@ -9,3 +9,4 @@ bytemuck = { version = "1.13.1", features = ["bytemuck_derive", "derive"] }
 env_logger = "0.10.0"
 itertools = "0.10.5"
 log = "0.4.17"
+rand = "0.8.5"

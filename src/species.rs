@@ -32,7 +32,7 @@ pub struct Agents(Buffer);
 /// Maps species to the existing agents for the species. Lives in the Render world.
 struct SpeciesMap(HashMap<SpeciesId, Agents>);
 
-#[derive(Component)]
+#[derive(Component, Debug)]
 /// Marker component that indicates the agents for a species need to be intitialized.
 pub struct Uninitialized;
 
@@ -89,7 +89,12 @@ fn render_prepare_agents(
     query: Query<(Entity, &SpeciesId, &SpeciesOptions)>,
     mut species: ResMut<SpeciesMap>,
     device: Res<RenderDevice>,
+    simulator: Option<Res<crate::sim::Pipelines>>,
 ) {
+    if !simulator.is_some_and(|p| p.loaded()) {
+        // don't bother adding any buffers if the pipeline isn't running
+        return;
+    }
     {
         // add components for all species to the render world, creating buffers as needed
         let mut next_species = HashMap::new();
@@ -109,7 +114,7 @@ fn render_prepare_agents(
             };
             next_species.insert(species_id, agents.clone());
 
-            commands.entity(id).insert(agents);
+            entity.insert(agents);
         }
         // only hold on to buffers for live species
         *species = SpeciesMap(next_species);
@@ -140,12 +145,10 @@ pub struct Plugin;
 impl bevy::app::Plugin for Plugin {
     fn build(&self, app: &mut App) {
         app.add_plugin(ExtractComponentPlugin::<SpeciesOptions>::default());
-        {
-            let render_app = app.sub_app_mut(RenderApp);
-            render_app.init_resource::<SpeciesMap>();
 
-            render_app.add_system(render_queue_agent_bind_groups.in_set(RenderSet::Queue));
-            render_app.add_system(render_prepare_agents.in_set(RenderSet::Prepare));
-        }
+        app.sub_app_mut(RenderApp)
+            .init_resource::<SpeciesMap>()
+            .add_system(render_queue_agent_bind_groups.in_set(RenderSet::Queue))
+            .add_system(render_prepare_agents.in_set(RenderSet::Prepare));
     }
 }

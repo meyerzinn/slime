@@ -1,6 +1,8 @@
 use crate::{
-    species::{AgentsBindGroup, AgentsBindGroupLayout, SpeciesId, SpeciesOptions, Uninitialized},
-    SecondaryFramebuffer,
+    species::{
+        Agents, AgentsBindGroup, AgentsBindGroupLayout, SpeciesId, SpeciesOptions, Uninitialized,
+    },
+    Framebuffers,
 };
 use bevy::{
     prelude::*,
@@ -10,54 +12,93 @@ use bevy::{
         render_graph::{self, RenderGraph},
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-            BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
+            BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
             BufferBindingType, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
-            ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, PipelineCache,
-            ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType,
-            TextureViewDimension,
+            CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor,
+            ComputePipeline, ComputePipelineDescriptor, Face, FragmentState, FrontFace, LoadOp,
+            MultisampleState, Operations, PipelineCache, PolygonMode, PrimitiveState,
+            PrimitiveTopology, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+            RenderPipelineDescriptor, ShaderStages, StorageTextureAccess, TextureFormat,
+            TextureSampleType, TextureViewDimension,
         },
-        renderer::RenderDevice,
+        renderer::{RenderDevice, RenderQueue},
         RenderApp, RenderSet,
     },
 };
-use std::ops::Deref;
 
-const SIMULATION: &'static str = "simulation";
+const SIMULATION: &str = "simulation";
 const WORKGROUPS: UVec3 = UVec3::new(256, 1, 1);
 
 #[derive(Resource, Deref, DerefMut)]
-struct TexturesBindGroupLayout(BindGroupLayout);
+struct TextureBindGroupLayout(BindGroupLayout);
 
-impl FromWorld for TexturesBindGroupLayout {
+impl FromWorld for TextureBindGroupLayout {
     fn from_world(world: &mut World) -> Self {
         let device: &RenderDevice = world.resource::<RenderDevice>();
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: "TexturesBindGroupLayout".into(),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
+            label: "TextureBindGroupLayout".into(),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageTexture {
-                        access: StorageTextureAccess::WriteOnly,
-                        format: TextureFormat::Rgba8Unorm,
-                        view_dimension: TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-            ],
+                count: None,
+            }],
         });
         Self(layout)
     }
+}
+
+#[derive(Resource, Deref, DerefMut)]
+struct StorageTextureBindGroupLayout(BindGroupLayout);
+
+impl FromWorld for StorageTextureBindGroupLayout {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource::<RenderDevice>();
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: "StorageTextureBindGroupLayout".into(),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba8Unorm,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            }],
+        });
+        Self(layout)
+    }
+}
+
+#[derive(Resource)]
+struct StorageTextureBindGroups {
+    primary: BindGroup,
+    secondary: BindGroup,
+}
+
+fn render_queue_storage_texture_bind_groups(
+    mut commands: Commands,
+    framebuffers: Res<Framebuffers>,
+    gpu_images: Res<RenderAssets<Image>>,
+    layout: Res<StorageTextureBindGroupLayout>,
+    device: Res<RenderDevice>,
+) {
+    let [primary, secondary] = [0, 1].map(|i| {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some(&format!("StorageTextureBindGroup_{}", i)),
+            layout: &layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(&gpu_images[&framebuffers[i]].texture_view),
+            }],
+        })
+    });
+    commands.insert_resource(StorageTextureBindGroups { primary, secondary });
 }
 
 #[derive(Resource, Deref, DerefMut)]
@@ -70,7 +111,7 @@ impl FromWorld for DirectionBindGroupLayout {
             label: "DirectionBindGroupLayout".into(),
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
-                visibility: ShaderStages::COMPUTE,
+                visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -86,38 +127,59 @@ impl FromWorld for DirectionBindGroupLayout {
 }
 
 #[derive(Resource)]
-struct TexturesBindGroups {
+struct TextureBindGroups {
     primary: BindGroup,
     secondary: BindGroup,
 }
 
 fn render_queue_textures_bind_group(
     mut commands: Commands,
-    primary: Res<super::PrimaryFramebuffer>,
-    secondary: Res<super::SecondaryFramebuffer>,
+    framebuffers: Res<Framebuffers>,
     gpu_images: Res<RenderAssets<Image>>,
-    layout: Res<TexturesBindGroupLayout>,
+    layout: Res<TextureBindGroupLayout>,
     device: Res<RenderDevice>,
 ) {
-    let primary = &gpu_images[&primary].texture_view;
-    let secondary = &gpu_images[&secondary].texture_view;
     let [primary, secondary] = [0, 1].map(|i| {
         device.create_bind_group(&BindGroupDescriptor {
-            label: Some(&format!("simulate::TexturesBindGroup_{}", i)),
+            label: Some(&format!("simulate::TextureBindGroup_{}", i)),
             layout: &layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: i,
-                    resource: BindingResource::TextureView(primary),
-                },
-                BindGroupEntry {
-                    binding: 1 - i,
-                    resource: BindingResource::TextureView(secondary),
-                },
-            ],
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(&gpu_images[&framebuffers[i]].texture_view),
+            }],
         })
     });
-    commands.insert_resource(TexturesBindGroups { primary, secondary });
+    commands.insert_resource(TextureBindGroups { primary, secondary });
+}
+
+#[derive(Resource, Deref, DerefMut)]
+struct EmptyBindGroupLayout(BindGroupLayout);
+
+impl FromWorld for EmptyBindGroupLayout {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource::<RenderDevice>();
+        let dummy_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: "dummy".into(),
+            entries: &[],
+        });
+        Self(dummy_layout)
+    }
+}
+
+#[derive(Resource, Deref, DerefMut)]
+struct EmptyBindGroup(BindGroup);
+
+impl FromWorld for EmptyBindGroup {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource();
+        let layout: &EmptyBindGroupLayout = world.resource();
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: "dummy".into(),
+            layout,
+            entries: &[],
+        });
+        Self(bind_group)
+    }
 }
 
 #[derive(Resource)]
@@ -168,30 +230,108 @@ impl FromWorld for DirectionBindGroups {
     }
 }
 
+#[derive(Resource, Deref, DerefMut)]
+struct SeedBuffer(Buffer);
+
+impl FromWorld for SeedBuffer {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource();
+        let seed: u32 = rand::random();
+        let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: "random seed (u32)".into(),
+            contents: bytemuck::bytes_of(&seed),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+        Self(buffer)
+    }
+}
+
+fn render_prepare_update_random_seed(queue: Res<RenderQueue>, buffer: Res<SeedBuffer>) {
+    let seed: u32 = rand::random();
+    queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&seed));
+}
+
+#[derive(Resource, Deref, DerefMut)]
+struct SeedBindGroupLayout(BindGroupLayout);
+
+impl FromWorld for SeedBindGroupLayout {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource::<RenderDevice>();
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: "SeedBindGroupLayout".into(),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some((std::mem::size_of::<u32>() as u64).try_into().unwrap()),
+                },
+                count: None,
+            }],
+        });
+        Self(layout)
+    }
+}
+
+#[derive(Resource, Deref, DerefMut)]
+struct SeedBindGroup(BindGroup);
+
+impl FromWorld for SeedBindGroup {
+    fn from_world(world: &mut World) -> Self {
+        let device: &RenderDevice = world.resource();
+        let layout: &SeedBindGroupLayout = world.resource();
+        let buffer: &SeedBuffer = world.resource();
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: "SeedBindGroup".into(),
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        Self(bind_group)
+    }
+}
+
 #[derive(Resource)]
-enum Pipelines {
+pub enum Pipelines {
     Pending {
         init: CachedComputePipelineId,
         update: CachedComputePipelineId,
         project: CachedComputePipelineId,
-        blur: CachedComputePipelineId,
+        blur: CachedRenderPipelineId,
     },
     Cached {
         init: ComputePipeline,
         update: ComputePipeline,
         project: ComputePipeline,
-        blur: ComputePipeline,
+        blur: RenderPipeline,
     },
 }
 
-fn render_queue_prepare_pipelines(
+impl Pipelines {
+    /// Returns whether the pipelines are ready to run during this render pass.
+    pub fn loaded(&self) -> bool {
+        matches!(self, Self::Cached { .. })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_queue_pipelines(
     mut commands: Commands,
     pipelines: Option<Res<Pipelines>>,
-    agents_bind_group_layout: Res<AgentsBindGroupLayout>,
-    textures_bind_group_layout: Res<TexturesBindGroupLayout>,
-    direction_bind_group_layout: Res<DirectionBindGroupLayout>,
+    empty_layout: Res<EmptyBindGroupLayout>,
+    abgl: Res<AgentsBindGroupLayout>,
+    tbgl: Res<TextureBindGroupLayout>,
+    stbgl: Res<StorageTextureBindGroupLayout>,
+    dbgl: Res<DirectionBindGroupLayout>,
+    sbgl: Res<SeedBindGroupLayout>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+
+    gpu_images: Res<RenderAssets<Image>>,
+    framebuffers: Res<Framebuffers>,
 ) {
     match pipelines {
         None => {
@@ -199,21 +339,26 @@ fn render_queue_prepare_pipelines(
 
             let init = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("[SimulationPipelines] init_pipeline".into()),
-                layout: vec![agents_bind_group_layout.deref().deref().clone()],
+                layout: vec![
+                    abgl.clone(),
+                    empty_layout.clone(),
+                    empty_layout.clone(),
+                    sbgl.clone(),
+                ],
                 push_constant_ranges: Vec::new(),
                 shader: shader.clone(),
                 shader_defs: vec![],
                 entry_point: "init".into(),
             });
 
-            let mut layout = vec![
-                agents_bind_group_layout.deref().deref().clone(),
-                textures_bind_group_layout.deref().deref().clone(),
-            ];
-
             let update = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("[SimulationPipelines] update".into()),
-                layout: layout.clone(),
+                layout: vec![
+                    abgl.clone(),
+                    tbgl.clone(),
+                    empty_layout.clone(),
+                    sbgl.clone(),
+                ],
                 push_constant_ranges: Vec::new(),
                 shader: shader.clone(),
                 shader_defs: vec![],
@@ -222,22 +367,50 @@ fn render_queue_prepare_pipelines(
 
             let project = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("[SimulationPipelines] project".into()),
-                layout: layout.clone(),
+                layout: vec![abgl.clone(), empty_layout.clone(), stbgl.clone()],
                 push_constant_ranges: Vec::new(),
                 shader: shader.clone(),
                 shader_defs: vec![],
                 entry_point: "project".into(),
             });
 
-            layout.push(direction_bind_group_layout.deref().deref().clone());
-
-            let blur = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            let blur = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                 label: Some("[SimulationPipelines] blur".into()),
-                layout: layout.clone(),
+                layout: vec![
+                    empty_layout.clone(),
+                    tbgl.clone(),
+                    empty_layout.clone(),
+                    dbgl.clone(),
+                ],
                 push_constant_ranges: Vec::new(),
-                shader: shader.clone(),
-                shader_defs: vec![],
-                entry_point: "blur".into(),
+                vertex:
+                    bevy::core_pipeline::fullscreen_vertex_shader::fullscreen_shader_vertex_state(),
+                primitive: PrimitiveState {
+                    topology: PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: FrontFace::Ccw,
+                    cull_mode: Some(Face::Back),
+                    unclipped_depth: false,
+                    polygon_mode: PolygonMode::Fill,
+                    // @todo check if we can do conservative rasterization
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: Some(FragmentState {
+                    shader,
+                    shader_defs: Vec::new(),
+                    entry_point: "blur_fragment".into(),
+                    targets: vec![Some(ColorTargetState {
+                        format: gpu_images[&framebuffers[0]].texture_format,
+                        blend: None,
+                        write_mask: ColorWrites::ALL,
+                    })],
+                }),
             });
 
             commands.insert_resource(Pipelines::Pending {
@@ -247,27 +420,25 @@ fn render_queue_prepare_pipelines(
                 blur,
             })
         }
-        Some(res) => match *res.deref() {
+        Some(res) => match *res {
             Pipelines::Pending {
                 init,
                 update,
                 project,
                 blur,
             } => {
-                match (
+                if let (Some(init), Some(update), Some(project), Some(blur)) = (
                     pipeline_cache.get_compute_pipeline(init),
                     pipeline_cache.get_compute_pipeline(update),
                     pipeline_cache.get_compute_pipeline(project),
-                    pipeline_cache.get_compute_pipeline(blur),
+                    pipeline_cache.get_render_pipeline(blur),
                 ) {
-                    (Some(init), Some(update), Some(project), Some(blur)) => commands
-                        .insert_resource(Pipelines::Cached {
-                            init: init.clone(),
-                            update: update.clone(),
-                            project: project.clone(),
-                            blur: blur.clone(),
-                        }),
-                    _ => { /* pipelines are still pending */ }
+                    commands.insert_resource(Pipelines::Cached {
+                        init: init.clone(),
+                        update: update.clone(),
+                        project: project.clone(),
+                        blur: blur.clone(),
+                    });
                 }
             }
             Pipelines::Cached { .. } => { /* pipelines already valid */ }
@@ -292,73 +463,123 @@ impl render_graph::Node for Simulation {
         }) = world.get_resource::<Pipelines>()
         {
             // pipelines are created & cached
-            let TexturesBindGroups { primary, secondary } = world.resource::<TexturesBindGroups>();
+
+            let TextureBindGroups {
+                primary: tbg_p,
+                secondary: tbg_s,
+            } = world.resource();
+
+            let StorageTextureBindGroups {
+                primary: stbg_p,
+                secondary: _stbg_s,
+            } = world.resource();
+
+            let rs: &SeedBindGroup = world.resource();
+
+            let EmptyBindGroup(empty) = world.resource();
 
             let species: Vec<_> = world
                 .iter_entities()
                 .filter(|e| {
-                    e.contains::<SpeciesId>()
+                    e.contains::<Agents>()
+                        && e.contains::<SpeciesId>()
                         && e.contains::<SpeciesOptions>()
                         && e.contains::<AgentsBindGroup>()
                 })
                 .collect();
 
-            let encoder = render_context.command_encoder();
+            {
+                let encoder = render_context.command_encoder();
 
-            for sp in species {
-                let id = sp.get::<SpeciesId>().unwrap();
-                let so = sp.get::<SpeciesOptions>().unwrap();
-                let bg = sp.get::<AgentsBindGroup>().unwrap();
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some(&format!("simulation (species): {:?} ({})", id, so.name)),
-                });
+                for sp in species {
+                    let id = sp.get::<SpeciesId>().unwrap();
+                    let so = sp.get::<SpeciesOptions>().unwrap();
+                    let agents_bg = sp.get::<AgentsBindGroup>().unwrap();
+                    {
+                        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                            label: Some(&format!("simulation (species): {:?} ({})", id, so.name)),
+                        });
 
-                pass.set_bind_group(0, bg, &[]);
-                pass.set_bind_group(1, primary, &[]);
-
-                if sp.contains::<Uninitialized>() {
-                    // initialize agents
-                    pass.set_pipeline(init);
-                } else {
-                    // update agents
-                    pass.set_pipeline(update);
+                        pass.set_bind_group(0, agents_bg, &[]);
+                        pass.set_bind_group(2, &empty, &[]);
+                        pass.set_bind_group(3, rs, &[]);
+                        if sp.contains::<Uninitialized>() {
+                            // initialize agents
+                            pass.set_bind_group(1, &empty, &[]);
+                            pass.set_pipeline(init);
+                        } else {
+                            // update agents
+                            pass.set_bind_group(1, tbg_p, &[]);
+                            pass.set_pipeline(update);
+                        }
+                        pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
+                    }
+                    {
+                        // @todo maybe need to change shader to blend?
+                        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                            label: Some(&format!("project (species): {:?} ({})", id, so.name)),
+                        });
+                        // project the agents onto the primary buffer
+                        pass.set_bind_group(0, agents_bg, &[]);
+                        pass.set_bind_group(1, empty, &[]);
+                        pass.set_bind_group(2, stbg_p, &[]);
+                        pass.set_pipeline(project);
+                        pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
+                    }
                 }
-                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
-
-                // project the agents onto the primary buffer
-                pass.set_bind_group(1, secondary, &[]);
-                pass.set_pipeline(project);
-                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
-
-                let DirectionBindGroups {
-                    horizontal,
-                    vertical,
-                } = &world.resource::<_>();
-
-                pass.set_pipeline(blur);
-
-                // apply first blur pass to primary onto secondary
-                pass.set_bind_group(1, primary, &[]);
-                pass.set_bind_group(2, horizontal, &[]);
-                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
-
-                // apply second blur pass to secondary onto primary
-                pass.set_bind_group(1, secondary, &[]);
-                pass.set_bind_group(2, vertical, &[]);
-                pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
             }
 
-            // no need to clear?
+            let gpu_images: &RenderAssets<Image> = world.resource();
+            let Framebuffers([fb_primary, fb_secondary]): &Framebuffers = world.resource();
 
-            // let gpu_images = world.resource::<RenderAssets<Image>>();
-            // let secondary = &gpu_images[world.resource::<SecondaryFramebuffer>().deref()];
-            // let range_all = ImageSubresourceRange {
-            //     aspect: TextureAspect::All,
-            //     base_mip_level: 0,
-            //     mip_level_count: secondary.mip_level_count.try_into().ok(),
-            //     base_array_layer: 0,
-            //     array_layer_count: None,
-            // };
+            let DirectionBindGroups {
+                horizontal,
+                vertical,
+            } = &world.resource::<_>();
+
+            // horizontal blur pass
+            {
+                let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                    label: "blur (horizontal)".into(),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &gpu_images[fb_secondary].texture_view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::RED.into()),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+                pass.set_bind_group(0, empty, &[]);
+                pass.set_bind_group(1, tbg_p, &[]);
+                pass.set_bind_group(2, empty, &[]);
+                pass.set_bind_group(3, horizontal, &[]);
+                pass.set_render_pipeline(blur);
+                pass.draw(0..4, 0..1);
+            }
+
+            // vertical blur pass
+            {
+                let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                    label: "blur (vertical)".into(),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &gpu_images[fb_primary].texture_view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::BLUE.into()),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+                pass.set_bind_group(0, empty, &[]);
+                pass.set_bind_group(1, tbg_s, &[]);
+                pass.set_bind_group(2, empty, &[]);
+                pass.set_bind_group(3, vertical, &[]);
+                pass.set_render_pipeline(blur);
+                pass.draw(0..4, 0..1);
+            }
         }
         Ok(())
     }
@@ -371,12 +592,20 @@ impl bevy::app::Plugin for Plugin {
         {
             let render_app = app.sub_app_mut(RenderApp);
             render_app
-                .init_resource::<TexturesBindGroupLayout>()
                 .init_resource::<AgentsBindGroupLayout>()
                 .init_resource::<DirectionBindGroupLayout>()
                 .init_resource::<DirectionBindGroups>()
-                .add_system(render_queue_prepare_pipelines.in_set(RenderSet::Queue))
-                .add_system(render_queue_textures_bind_group.in_set(RenderSet::Queue));
+                .init_resource::<EmptyBindGroupLayout>()
+                .init_resource::<EmptyBindGroup>()
+                .init_resource::<SeedBuffer>()
+                .init_resource::<SeedBindGroupLayout>()
+                .init_resource::<SeedBindGroup>()
+                .init_resource::<StorageTextureBindGroupLayout>()
+                .init_resource::<TextureBindGroupLayout>()
+                .add_system(render_prepare_update_random_seed.in_set(RenderSet::Prepare))
+                .add_system(render_queue_pipelines.in_set(RenderSet::Queue))
+                .add_system(render_queue_textures_bind_group.in_set(RenderSet::Queue))
+                .add_system(render_queue_storage_texture_bind_groups.in_set(RenderSet::Queue));
 
             let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
             // Add the compute step to the render pipeline.
