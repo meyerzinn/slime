@@ -1,11 +1,21 @@
 #import bevy_core_pipeline::fullscreen_vertex_shader
-#import "shaders/pcg.wgsl"
+#import "shaders/rand.wgsl"
 
-@group(3) @binding(0)
-var<uniform> random_seed: u32;
+struct Agent {
+  pos: vec2<f32>,
+  angle: f32,
+  _padding: u32,
+}
+
+struct Species {
+  color: vec3<f32>,
+  speed: f32,
+}
 
 @group(0) @binding(0)
 var<storage, read_write> agents: array<Agent>; // someday: bind write-only (https://github.com/gfx-rs/wgpu/issues/2897)
+@group(0) @binding(1)
+var<uniform> species: Species;
 
 @group(1) @binding(0)
 var t_trails_prev: texture_2d<f32>;
@@ -13,11 +23,8 @@ var t_trails_prev: texture_2d<f32>;
 @group(2) @binding(0)
 var t_trails_next: texture_storage_2d<rgba8unorm, write>;
 
-struct Agent {
-  pos: vec2<f32>,
-  angle: f32,
-  species: u32,
-}
+@group(3) @binding(0)
+var<uniform> random_seed: u32;
 
 const TWO_PI: f32 = 6.28318530718;
 
@@ -39,12 +46,11 @@ fn init(@builtin(local_invocation_index) local_id: u32,
     var agent: Agent;
     agent.pos = vec2<f32>(rand_f32(), rand_f32());
     agent.angle = TWO_PI * rand_f32();
-    agent.species = 32u;
     agents[index] = agent;
   }
 }
 
-const VELOCITY: f32 = 0.0001;
+const VELOCITY: f32 = 0.00004;
 
 @compute
 @workgroup_size(256, 1, 1)
@@ -63,7 +69,7 @@ fn update(@builtin(local_invocation_index) local_id: u32,
   for (var index = start; index < min(start + agents_per_kernel, total_agents); index++) {
     var agent: Agent = agents[index];
     var heading = vec2<f32>(cos(agent.angle), sin(agent.angle));
-    agent.pos += VELOCITY * heading;
+    agent.pos += species.speed * heading;
     var edge_normal = vec2<f32>(0.0, 0.0);
     if (agent.pos.x < 0.0) {
       agent.pos.x = 0.0;
@@ -82,7 +88,8 @@ fn update(@builtin(local_invocation_index) local_id: u32,
       edge_normal.y = -1.0;
     }
     heading -= 2.0 * edge_normal * dot(heading, edge_normal);
-    agent.angle = atan2(heading.y, heading.x);
+    // slightly perturb the heading by up to 0.1 degrees
+    agent.angle = atan2(heading.y, heading.x) + 0.00174533 * (rand_f32() - 0.5);
     agents[index] = agent;
   }
 }
@@ -105,8 +112,7 @@ fn project(@builtin(local_invocation_index) local_id: u32,
     var agent: Agent = agents[index];
     let coords = vec2<u32>(clamp(floor(agent.pos * dims), vec2<f32>(0.0), dims - 1.0));
     // @todo compute color ("released chemical") for the agent
-    let color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
-    textureStore(t_trails_next, coords, color);
+    textureStore(t_trails_next, coords, vec4(species.color, 1.0));
   }
 }
 
@@ -114,6 +120,7 @@ fn project(@builtin(local_invocation_index) local_id: u32,
 var<uniform> direction: vec2<i32>;
 
 var<private> BLUR_COEFFS : array<f32, 5> = array<f32, 5>(0.0702702703, 0.3162162162, 0.1135135135, 0.3162162162, 0.0702702703);
+// var<private> BLUR_COEFFS : array<f32, 5> = array<f32, 5>(0.1, 0.30, 0.159, 0.30, 0.1);
 
 @fragment
 fn blur_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
@@ -128,5 +135,6 @@ fn blur_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         color += textureLoad(t_trails_prev, vec2<u32>(off), 0).rgb * BLUR_COEFFS[i]; 
       }
     }
+    color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4(color, 1.0);
 }

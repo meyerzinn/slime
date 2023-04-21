@@ -5,7 +5,7 @@ use bevy::{
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
             BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer,
-            BufferBindingType, BufferDescriptor, BufferUsages, ShaderStages,
+            BufferBindingType, BufferDescriptor, BufferInitDescriptor, BufferUsages, ShaderStages,
         },
         renderer::RenderDevice,
         RenderApp, RenderSet,
@@ -14,23 +14,30 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Copy, Clone, Pod, Zeroable, Default)]
+#[repr(C)]
+pub struct GpuOptions {
+    color: Vec3,
+    speed: f32,
+}
+
+#[derive(Copy, Clone, Pod, Zeroable, Default)]
 #[repr(C)]
 pub struct GpuAgent {
     pos: Vec2,
     angle: f32,
-    id: u32,
+    _padding: [u8; 4],
 }
-
-#[derive(Component, Deref, DerefMut)]
-pub struct AgentsBindGroup(BindGroup);
 
 #[derive(Component, Deref, DerefMut, Clone)]
 pub struct Agents(Buffer);
 
+#[derive(Component, Deref, DerefMut, Clone)]
+pub struct Species(Buffer);
+
 #[derive(Resource, Deref, DerefMut, Default)]
 /// Maps species to the existing agents for the species. Lives in the Render world.
-struct SpeciesMap(HashMap<SpeciesId, Agents>);
+struct SpeciesMap(HashMap<SpeciesId, (Species, Agents)>);
 
 #[derive(Component, Debug)]
 /// Marker component that indicates the agents for a species need to be intitialized.
@@ -42,7 +49,18 @@ pub struct SpeciesId(pub u64);
 #[derive(Clone, Component)]
 pub struct SpeciesOptions {
     pub name: String,
+    pub color: Color,
+    pub speed: f32,
     pub num_agents: u32,
+}
+
+impl Into<GpuOptions> for &SpeciesOptions {
+    fn into(self) -> GpuOptions {
+        GpuOptions {
+            color: Vec4::from_array(self.color.as_linear_rgba_f32()).truncate(),
+            speed: self.speed,
+        }
+    }
 }
 
 impl ExtractComponent for SpeciesOptions {
@@ -61,30 +79,46 @@ impl ExtractComponent for SpeciesOptions {
 }
 
 #[derive(Resource, Deref, DerefMut)]
-pub struct AgentsBindGroupLayout(BindGroupLayout);
+pub struct SpeciesBindGroupLayout(BindGroupLayout);
 
-impl FromWorld for AgentsBindGroupLayout {
+impl FromWorld for SpeciesBindGroupLayout {
     fn from_world(world: &mut World) -> Self {
-        let device = world.resource::<RenderDevice>();
+        let device: &RenderDevice = world.resource();
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: "AgentsBindGroupLayout".into(),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            label: "SpeciesBindGroupLayout".into(),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None, // compute this dynamically
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            (std::mem::size_of::<GpuOptions>() as u64)
+                                .try_into()
+                                .unwrap(),
+                        ),
+                    },
+                    count: None,
+                },
+            ],
         });
         Self(layout)
     }
 }
 
 // synchronize the species list from the main world to the render world
-fn render_prepare_agents(
+fn render_prepare_species(
     mut commands: Commands,
     query: Query<(Entity, &SpeciesId, &SpeciesOptions)>,
     mut species: ResMut<SpeciesMap>,
@@ -92,7 +126,7 @@ fn render_prepare_agents(
     simulator: Option<Res<crate::sim::Pipelines>>,
 ) {
     if !simulator.is_some_and(|p| p.loaded()) {
-        // don't bother adding any buffers if the pipeline isn't running
+        // don't bother adding any buffers if the pipeline isn't loaded
         return;
     }
     {
@@ -100,43 +134,58 @@ fn render_prepare_agents(
         let mut next_species = HashMap::new();
         for (id, &species_id, options) in &query {
             let mut entity = commands.entity(id);
-            let agents = if let Some(agents) = species.get(&species_id) {
-                agents.clone()
+            let components = if let Some(data) = species.get(&species_id) {
+                data.clone()
             } else {
-                let buffer = device.create_buffer(&BufferDescriptor {
+                let agents = device.create_buffer(&BufferDescriptor {
                     label: Some(&format!("[species {}] agents", options.name)),
                     size: options.num_agents as u64 * (std::mem::size_of::<GpuAgent>() as u64),
                     usage: BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 });
-                entity.insert(Uninitialized);
-                Agents(buffer)
+                let gpu_options: GpuOptions = options.into();
+                let species = device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some(&format!("[species {}] options", options.name)),
+                    contents: bytemuck::bytes_of(&gpu_options),
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                });
+                entity.insert(Uninitialized); // mark uninitialized
+                (Species(species), Agents(agents))
             };
-            next_species.insert(species_id, agents.clone());
-
-            entity.insert(agents);
+            next_species.insert(species_id, components.clone());
+            // add the agents
+            entity.insert(components);
         }
         // only hold on to buffers for live species
         *species = SpeciesMap(next_species);
     }
 }
 
-fn render_queue_agent_bind_groups(
+#[derive(Component, Deref, DerefMut)]
+pub struct SpeciesBindGroup(BindGroup);
+
+fn render_queue_species_bind_groups(
     mut commands: Commands,
-    query: Query<(Entity, &SpeciesId, &Agents)>,
+    query: Query<(Entity, &SpeciesId, &Species, &Agents)>,
     device: Res<RenderDevice>,
-    layout: Res<AgentsBindGroupLayout>,
+    layout: Res<SpeciesBindGroupLayout>,
 ) {
-    for (id, species_id, agents) in &query {
+    for (id, species_id, species, agents) in &query {
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some(&format!("AgentBindGroup [{:?}]", species_id)),
+            label: Some(&format!("SpeciesBindGroup [{:?}]", species_id)),
             layout: &layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: agents.as_entire_binding(),
-            }],
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: agents.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: species.as_entire_binding(),
+                },
+            ],
         });
-        commands.entity(id).insert(AgentsBindGroup(bind_group));
+        commands.entity(id).insert(SpeciesBindGroup(bind_group));
     }
 }
 
@@ -148,7 +197,7 @@ impl bevy::app::Plugin for Plugin {
 
         app.sub_app_mut(RenderApp)
             .init_resource::<SpeciesMap>()
-            .add_system(render_queue_agent_bind_groups.in_set(RenderSet::Queue))
-            .add_system(render_prepare_agents.in_set(RenderSet::Prepare));
+            .add_system(render_queue_species_bind_groups.in_set(RenderSet::Queue))
+            .add_system(render_prepare_species.in_set(RenderSet::Prepare));
     }
 }

@@ -11,7 +11,7 @@ use bevy::{
     },
 };
 
-const SIZE: UVec2 = UVec2::new(400, 400);
+const SIZE: UVec2 = UVec2::new(1536, 1536);
 
 #[derive(Resource, Clone, Deref, DerefMut, ExtractResource)]
 

@@ -1,6 +1,7 @@
 use crate::{
     species::{
-        Agents, AgentsBindGroup, AgentsBindGroupLayout, SpeciesId, SpeciesOptions, Uninitialized,
+        Agents, Species, SpeciesBindGroup, SpeciesBindGroupLayout, SpeciesId, SpeciesOptions,
+        Uninitialized,
     },
     Framebuffers,
 };
@@ -321,12 +322,12 @@ impl Pipelines {
 fn render_queue_pipelines(
     mut commands: Commands,
     pipelines: Option<Res<Pipelines>>,
-    empty_layout: Res<EmptyBindGroupLayout>,
-    abgl: Res<AgentsBindGroupLayout>,
-    tbgl: Res<TextureBindGroupLayout>,
+    empty_bgl: Res<EmptyBindGroupLayout>,
+    species_bgl: Res<SpeciesBindGroupLayout>,
+    texture_bgl: Res<TextureBindGroupLayout>,
     stbgl: Res<StorageTextureBindGroupLayout>,
     dbgl: Res<DirectionBindGroupLayout>,
-    sbgl: Res<SeedBindGroupLayout>,
+    seed_bgl: Res<SeedBindGroupLayout>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 
@@ -340,10 +341,10 @@ fn render_queue_pipelines(
             let init = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("[SimulationPipelines] init_pipeline".into()),
                 layout: vec![
-                    abgl.clone(),
-                    empty_layout.clone(),
-                    empty_layout.clone(),
-                    sbgl.clone(),
+                    species_bgl.clone(),
+                    empty_bgl.clone(),
+                    empty_bgl.clone(),
+                    seed_bgl.clone(),
                 ],
                 push_constant_ranges: Vec::new(),
                 shader: shader.clone(),
@@ -354,10 +355,10 @@ fn render_queue_pipelines(
             let update = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("[SimulationPipelines] update".into()),
                 layout: vec![
-                    abgl.clone(),
-                    tbgl.clone(),
-                    empty_layout.clone(),
-                    sbgl.clone(),
+                    species_bgl.clone(),
+                    texture_bgl.clone(),
+                    empty_bgl.clone(),
+                    seed_bgl.clone(),
                 ],
                 push_constant_ranges: Vec::new(),
                 shader: shader.clone(),
@@ -367,7 +368,7 @@ fn render_queue_pipelines(
 
             let project = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("[SimulationPipelines] project".into()),
-                layout: vec![abgl.clone(), empty_layout.clone(), stbgl.clone()],
+                layout: vec![species_bgl.clone(), empty_bgl.clone(), stbgl.clone()],
                 push_constant_ranges: Vec::new(),
                 shader: shader.clone(),
                 shader_defs: vec![],
@@ -377,9 +378,9 @@ fn render_queue_pipelines(
             let blur = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                 label: Some("[SimulationPipelines] blur".into()),
                 layout: vec![
-                    empty_layout.clone(),
-                    tbgl.clone(),
-                    empty_layout.clone(),
+                    empty_bgl.clone(),
+                    texture_bgl.clone(),
+                    empty_bgl.clone(),
                     dbgl.clone(),
                 ],
                 push_constant_ranges: Vec::new(),
@@ -474,38 +475,39 @@ impl render_graph::Node for Simulation {
                 secondary: _stbg_s,
             } = world.resource();
 
-            let rs: &SeedBindGroup = world.resource();
+            let seed_bg: &SeedBindGroup = world.resource();
 
-            let EmptyBindGroup(empty) = world.resource();
+            let EmptyBindGroup(empty_bg) = world.resource();
 
             let species: Vec<_> = world
                 .iter_entities()
                 .filter(|e| {
                     e.contains::<Agents>()
+                        && e.contains::<Species>()
                         && e.contains::<SpeciesId>()
                         && e.contains::<SpeciesOptions>()
-                        && e.contains::<AgentsBindGroup>()
+                        && e.contains::<SpeciesBindGroup>()
                 })
                 .collect();
 
             {
-                let encoder = render_context.command_encoder();
-
                 for sp in species {
-                    let id = sp.get::<SpeciesId>().unwrap();
-                    let so = sp.get::<SpeciesOptions>().unwrap();
-                    let agents_bg = sp.get::<AgentsBindGroup>().unwrap();
+                    let encoder = render_context.command_encoder();
+                    let id: &SpeciesId = sp.get().unwrap();
+                    let so: &SpeciesOptions = sp.get().unwrap();
+                    let species_bg: &SpeciesBindGroup = sp.get().unwrap();
                     {
                         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                             label: Some(&format!("simulation (species): {:?} ({})", id, so.name)),
                         });
 
-                        pass.set_bind_group(0, agents_bg, &[]);
-                        pass.set_bind_group(2, &empty, &[]);
-                        pass.set_bind_group(3, rs, &[]);
+                        pass.set_bind_group(0, species_bg, &[]);
+                        pass.set_bind_group(2, &empty_bg, &[]);
+                        pass.set_bind_group(3, seed_bg, &[]);
+                        // pass.set_bind_group(4, , offsets)
                         if sp.contains::<Uninitialized>() {
                             // initialize agents
-                            pass.set_bind_group(1, &empty, &[]);
+                            pass.set_bind_group(1, &empty_bg, &[]);
                             pass.set_pipeline(init);
                         } else {
                             // update agents
@@ -520,8 +522,8 @@ impl render_graph::Node for Simulation {
                             label: Some(&format!("project (species): {:?} ({})", id, so.name)),
                         });
                         // project the agents onto the primary buffer
-                        pass.set_bind_group(0, agents_bg, &[]);
-                        pass.set_bind_group(1, empty, &[]);
+                        pass.set_bind_group(0, species_bg, &[]);
+                        pass.set_bind_group(1, empty_bg, &[]);
                         pass.set_bind_group(2, stbg_p, &[]);
                         pass.set_pipeline(project);
                         pass.dispatch_workgroups(WORKGROUPS.x, WORKGROUPS.y, WORKGROUPS.z);
@@ -551,9 +553,9 @@ impl render_graph::Node for Simulation {
                     })],
                     depth_stencil_attachment: None,
                 });
-                pass.set_bind_group(0, empty, &[]);
+                pass.set_bind_group(0, empty_bg, &[]);
                 pass.set_bind_group(1, tbg_p, &[]);
-                pass.set_bind_group(2, empty, &[]);
+                pass.set_bind_group(2, empty_bg, &[]);
                 pass.set_bind_group(3, horizontal, &[]);
                 pass.set_render_pipeline(blur);
                 pass.draw(0..4, 0..1);
@@ -573,9 +575,9 @@ impl render_graph::Node for Simulation {
                     })],
                     depth_stencil_attachment: None,
                 });
-                pass.set_bind_group(0, empty, &[]);
+                pass.set_bind_group(0, empty_bg, &[]);
                 pass.set_bind_group(1, tbg_s, &[]);
-                pass.set_bind_group(2, empty, &[]);
+                pass.set_bind_group(2, empty_bg, &[]);
                 pass.set_bind_group(3, vertical, &[]);
                 pass.set_render_pipeline(blur);
                 pass.draw(0..4, 0..1);
@@ -592,7 +594,7 @@ impl bevy::app::Plugin for Plugin {
         {
             let render_app = app.sub_app_mut(RenderApp);
             render_app
-                .init_resource::<AgentsBindGroupLayout>()
+                .init_resource::<SpeciesBindGroupLayout>()
                 .init_resource::<DirectionBindGroupLayout>()
                 .init_resource::<DirectionBindGroups>()
                 .init_resource::<EmptyBindGroupLayout>()

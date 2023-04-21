@@ -3,7 +3,15 @@ use bevy::prelude::*;
 fn setup(mut commands: Commands) {
     commands.spawn(slime::species::SpeciesOptions {
         name: "first".to_owned(),
-        num_agents: 1000,
+        num_agents: 10000,
+        color: Color::RED,
+        speed: 5e-6,
+    });
+    commands.spawn(slime::species::SpeciesOptions {
+        name: "second".to_owned(),
+        num_agents: 10000,
+        color: Color::YELLOW,
+        speed: 1e-6,
     });
     commands.spawn(Camera2dBundle::default());
 }
