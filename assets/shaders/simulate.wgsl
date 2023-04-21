@@ -51,6 +51,22 @@ fn init(@builtin(local_invocation_index) local_id: u32,
 }
 
 const VELOCITY: f32 = 0.00004;
+var<private> OFFSETS: array<vec2<i32>, 8> = array<vec2<i32>, 8>(
+  vec2<i32>(-1, -1),
+  vec2<i32>(-1, 0),
+  vec2<i32>(-1, 1),
+  vec2<i32>(0, 1),
+  vec2<i32>(1, 1),
+  vec2<i32>(1, 0),
+  vec2<i32>(1, -1),
+  vec2<i32>(0, -1)
+);
+
+// fn in_tex(t: texture_2d, c: vec2<i32>) -> bool {
+//   if (c.x < 0 || c.y < 0) return false;
+//   let dims = textureDimensions(t);
+//   return c.x < dims.x && c.y < dims.y;
+// }
 
 @compute
 @workgroup_size(256, 1, 1)
@@ -65,9 +81,18 @@ fn update(@builtin(local_invocation_index) local_id: u32,
   let total_agents: u32 = arrayLength(&agents);
   let agents_per_kernel = (total_agents + (total_kernels - 1u)) / total_kernels;
 
+  let dims = textureDimensions(t_trails_prev);
+
   let start = agents_per_kernel * local_id;  
   for (var index = start; index < min(start + agents_per_kernel, total_agents); index++) {
     var agent: Agent = agents[index];
+
+    // let tex_coords = vec2<u32>(clamp(floor(agent.pos * dims), vec2<f32>(0.0), dims - 1.0));
+
+    // for (var i = 0; i < 8; i++) {
+    //   let off = OFFSETS[i]
+    // }
+
     var heading = vec2<f32>(cos(agent.angle), sin(agent.angle));
     agent.pos += species.speed * heading;
     var edge_normal = vec2<f32>(0.0, 0.0);
@@ -119,8 +144,7 @@ fn project(@builtin(local_invocation_index) local_id: u32,
 @group(3) @binding(0)
 var<uniform> direction: vec2<i32>;
 
-var<private> BLUR_COEFFS : array<f32, 5> = array<f32, 5>(0.0702702703, 0.3162162162, 0.1135135135, 0.3162162162, 0.0702702703);
-// var<private> BLUR_COEFFS : array<f32, 5> = array<f32, 5>(0.1, 0.30, 0.159, 0.30, 0.1);
+var<private> BLUR_COEFFS : array<f32, 7> = array<f32, 7>(0.006, 0.061, 0.242, 0.1915, 0.242, 0.061, 0.006);
 
 @fragment
 fn blur_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
@@ -129,8 +153,8 @@ fn blur_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let coords = vec2<u32>(coords_upper_left.x, dims.y - coords_upper_left.y - 1u);
 
     var color = vec3<f32>(0.0);
-    for (var i = 0; i < 5; i++) {
-      let off = vec2<i32>(coords) + direction * (i - 2);
+    for (var i = 0; i < 7; i++) {
+      let off = vec2<i32>(coords) + direction * (i - 3);
       if (off.x >= 0 && off.x < i32(dims.x) && off.y >= 0 && off.y < i32(dims.y)) {
         color += textureLoad(t_trails_prev, vec2<u32>(off), 0).rgb * BLUR_COEFFS[i]; 
       }
