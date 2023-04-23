@@ -1,14 +1,17 @@
 #![feature(array_zip)]
 
 mod sim;
-pub mod species;
+
+pub use sim::*;
 
 use bevy::{
     prelude::*,
     render::{
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
     },
+    window::WindowResized,
 };
 
 const SIZE: UVec2 = UVec2::new(1536, 1536);
@@ -17,6 +20,24 @@ const SIZE: UVec2 = UVec2::new(1536, 1536);
 
 /// Represents the two alternating framebuffer.
 pub struct Framebuffers([Handle<Image>; 2]);
+
+#[derive(Component)]
+struct FillScreen;
+
+fn stretch_to_screen(
+    resize_event: Res<Events<WindowResized>>,
+    mut query: Query<&mut Sprite, With<FillScreen>>,
+) {
+    let mut reader = resize_event.get_reader();
+    if let Some(e) = reader.iter(&resize_event).last() {
+        for mut sprite in &mut query {
+            sprite.custom_size = Some(Vec2 {
+                x: e.width,
+                y: e.height,
+            });
+        }
+    }
+}
 
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let images = [0, 1].map(|_| {
@@ -40,14 +61,17 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let [primary, _] = images;
 
     // spawn a sprite for each image
-    commands.spawn(SpriteBundle {
-        sprite: Sprite {
-            custom_size: Some(Vec2::new(SIZE.x as f32, SIZE.y as f32)),
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(1024 as f32, 1024 as f32)),
+                ..default()
+            },
+            texture: primary,
             ..default()
         },
-        texture: primary,
-        ..default()
-    });
+        FillScreen,
+    ));
 }
 
 pub struct Plugin;
@@ -55,8 +79,8 @@ pub struct Plugin;
 impl bevy::app::Plugin for Plugin {
     fn build(&self, app: &mut App) {
         app.add_plugin(ExtractResourcePlugin::<Framebuffers>::default())
-            .add_plugin(species::Plugin)
             .add_plugin(sim::Plugin)
-            .add_startup_system(setup);
+            .add_startup_system(setup)
+            .add_system(stretch_to_screen.in_base_set(CoreSet::PreUpdate));
     }
 }

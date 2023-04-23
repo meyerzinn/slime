@@ -1,15 +1,22 @@
 #import bevy_core_pipeline::fullscreen_vertex_shader
-#import "shaders/rand.wgsl"
+#import "shaders/utils.wgsl"
+
+struct SimulationOptions {
+  evaporation: f32,
+  // @todo: repellants
+}
 
 struct Agent {
   pos: vec2<f32>,
   angle: f32,
-  _padding: u32,
 }
 
 struct Species {
   color: vec3<f32>,
   speed: f32,
+  turn_speed: f32,
+  view_distance: f32,
+  field_of_view: f32,
 }
 
 @group(0) @binding(0)
@@ -19,12 +26,17 @@ var<uniform> species: Species;
 
 @group(1) @binding(0)
 var t_trails_prev: texture_2d<f32>;
+@group(1) @binding(1)
+var s_trails_prev: sampler;
 
 @group(2) @binding(0)
 var t_trails_next: texture_storage_2d<rgba8unorm, write>;
 
 @group(3) @binding(0)
 var<uniform> random_seed: u32;
+
+@group(4) @binding(0)
+var<uniform> options: SimulationOptions;
 
 const TWO_PI: f32 = 6.28318530718;
 
@@ -43,30 +55,47 @@ fn init(@builtin(local_invocation_index) local_id: u32,
 
   let start = agents_per_kernel * local_id;
   for (var index = start; index < min(start + agents_per_kernel, total_agents); index++) {
+    let r = 0.5 * clamp(sqrt(rand_f32()), 0.0, 1.0);
+    let t = rand_f32() * TWO_PI;
     var agent: Agent;
-    agent.pos = vec2<f32>(rand_f32(), rand_f32());
-    agent.angle = TWO_PI * rand_f32();
+    agent.pos = 0.5 + r * vec2<f32>(cos(t), sin(t));
+    agent.angle = atan2(0.5 - agent.pos.y, 0.5 - agent.pos.x);
     agents[index] = agent;
   }
 }
 
-const VELOCITY: f32 = 0.00004;
-var<private> OFFSETS: array<vec2<i32>, 8> = array<vec2<i32>, 8>(
-  vec2<i32>(-1, -1),
-  vec2<i32>(-1, 0),
-  vec2<i32>(-1, 1),
-  vec2<i32>(0, 1),
-  vec2<i32>(1, 1),
-  vec2<i32>(1, 0),
-  vec2<i32>(1, -1),
-  vec2<i32>(0, -1)
-);
+const STEER_NUM_SAMPLES: u32 = 3u;
 
-// fn in_tex(t: texture_2d, c: vec2<i32>) -> bool {
-//   if (c.x < 0 || c.y < 0) return false;
-//   let dims = textureDimensions(t);
-//   return c.x < dims.x && c.y < dims.y;
-// }
+// returns the new heading for an agent
+fn steer(agent: Agent) -> f32 {
+  let angle_delta = (species.turn_speed * 2.0) / f32(STEER_NUM_SAMPLES - 1u);
+  var angle = agent.angle - species.turn_speed;
+  var t = agent.angle;
+  var t_sim = 0.0;
+  for (var i = 0u; i < STEER_NUM_SAMPLES; i++) {
+    let dir = vec2<f32>(cos(angle), sin(angle));
+    let wc =  species.view_distance * dir + agent.pos;
+    // @todo: is this needed?
+    if (wc.x < 0.0 || wc.y < 0.0 || wc.x >= 1.0 || wc.y >= 1.0) {
+      continue;
+    }
+    let tc = world_to_tex(vec2<u32>(textureDimensions(t_trails_prev)), wc);
+    let s = textureLoad(t_trails_prev, tc, 0).rgb;
+    let d = dot(species.color, s) * 2.0 - 1.0;
+    if (d > t_sim) {
+      t_sim = d;
+      t = angle;
+    }
+    angle += angle_delta;
+  }
+  return t;
+}
+
+// converts world coordinates to texel index, assuming pos.x and pos.y are in [0.0, 1.0].
+fn world_to_tex(dims: vec2<u32>, pos: vec2<f32>) -> vec2<u32> {
+  let scaled = pos * vec2<f32>(dims);
+  return vec2<u32>(clamp(floor(scaled), vec2<f32>(0.0), vec2<f32>(dims - 1u)));
+}
 
 @compute
 @workgroup_size(256, 1, 1)
@@ -87,14 +116,10 @@ fn update(@builtin(local_invocation_index) local_id: u32,
   for (var index = start; index < min(start + agents_per_kernel, total_agents); index++) {
     var agent: Agent = agents[index];
 
-    // let tex_coords = vec2<u32>(clamp(floor(agent.pos * dims), vec2<f32>(0.0), dims - 1.0));
-
-    // for (var i = 0; i < 8; i++) {
-    //   let off = OFFSETS[i]
-    // }
-
+    agent.angle = steer(agent);
     var heading = vec2<f32>(cos(agent.angle), sin(agent.angle));
     agent.pos += species.speed * heading;
+    
     var edge_normal = vec2<f32>(0.0, 0.0);
     if (agent.pos.x < 0.0) {
       agent.pos.x = 0.0;
@@ -131,34 +156,44 @@ fn project(@builtin(local_invocation_index) local_id: u32,
   let agents_per_kernel = (total_agents + (total_kernels - 1u)) / total_kernels;
 
   let start = agents_per_kernel * local_id;
-
-  let dims = vec2<f32>(textureDimensions(t_trails_next));
+  let dims = vec2<u32>(textureDimensions(t_trails_next));
   for (var index = start; index < min(start + agents_per_kernel, total_agents); index++) {
-    var agent: Agent = agents[index];
-    let coords = vec2<u32>(clamp(floor(agent.pos * dims), vec2<f32>(0.0), dims - 1.0));
-    // @todo compute color ("released chemical") for the agent
-    textureStore(t_trails_next, coords, vec4(species.color, 1.0));
+    let agent: Agent = agents[index];
+    let texel = world_to_tex(dims, agent.pos);
+    textureStore(t_trails_next, texel, vec4(species.color, 1.0));
   }
 }
 
 @group(3) @binding(0)
 var<uniform> direction: vec2<i32>;
 
-var<private> BLUR_COEFFS : array<f32, 7> = array<f32, 7>(0.006, 0.061, 0.242, 0.1915, 0.242, 0.061, 0.006);
+const BLUR_SAMPLE_COUNT: i32 = 4;
+
+var<private> BLUR_OFFSETS : array<f32, 4> = array<f32, 4>(
+    -2.431625915613778,
+    -0.4862426846689484,
+    1.4588111840004858,
+    3.0
+);
+
+var<private> BLUR_WEIGHTS : array<f32, 4> = array<f32, 4>(
+    0.24696196374528634,
+    0.34050702333458593,
+    0.30593582919679174,
+    0.10659518372333592
+);
+
 
 @fragment
 fn blur_fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let dims = vec2<u32>(textureDimensions(t_trails_prev));
-    let coords_upper_left = vec2<u32>(floor(in.position.xy));
-    let coords = vec2<u32>(coords_upper_left.x, dims.y - coords_upper_left.y - 1u);
-
+    let dims = vec2<f32>(textureDimensions(t_trails_prev));
     var color = vec3<f32>(0.0);
-    for (var i = 0; i < 7; i++) {
-      let off = vec2<i32>(coords) + direction * (i - 3);
-      if (off.x >= 0 && off.x < i32(dims.x) && off.y >= 0 && off.y < i32(dims.y)) {
-        color += textureLoad(t_trails_prev, vec2<u32>(off), 0).rgb * BLUR_COEFFS[i]; 
-      }
+    for (var i = 0; i < BLUR_SAMPLE_COUNT; i++)
+    {
+        let offset: vec2<f32> = vec2<f32>(direction) * BLUR_OFFSETS[i] / dims;
+        let weight: f32 = BLUR_WEIGHTS[i];
+        color += textureSample(t_trails_prev, s_trails_prev, in.uv + offset).rgb * weight;
     }
-    color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+    color = clamp(color - options.evaporation, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4(color, 1.0);
 }

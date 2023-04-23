@@ -5,7 +5,6 @@ edition = "2021"
 
 [profile.release]
 opt-level = 3
-lto = "fat"
 
 # Enable a small amount of optimization in debug mode
 [profile.dev]
@@ -17,7 +16,9 @@ opt-level = 3
 
 [dependencies]
 bevy = "0.10.1"
+bevy_egui = "0.20.3"
 bytemuck = { version = "1.13.1", features = ["bytemuck_derive", "derive"] }
+derive_more = "0.99.17"
 env_logger = "0.10.0"
 itertools = "0.10.5"
 log = "0.4.17"
