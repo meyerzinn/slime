@@ -132,7 +132,7 @@ impl FromWorld for Sampler {
     fn from_world(world: &mut World) -> Self {
         let device: &RenderDevice = world.resource();
         let sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some(&format!("TextureSampler")),
+            label: Some("TextureSampler"),
             address_mode_u: AddressMode::ClampToEdge,
             address_mode_v: AddressMode::ClampToEdge,
             mag_filter: FilterMode::Linear,

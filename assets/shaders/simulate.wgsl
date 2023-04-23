@@ -75,7 +75,7 @@ fn steer(agent: Agent) -> f32 {
   for (var i = 0u; i < STEER_NUM_SAMPLES; i++) {
     let dir = vec2<f32>(cos(angle), sin(angle));
     let wc =  species.view_distance * dir + agent.pos;
-    // @todo: is this needed?
+    // @todo: is this needed? we could skip and just take black if that is faster
     if (wc.x < 0.0 || wc.y < 0.0 || wc.x >= 1.0 || wc.y >= 1.0) {
       continue;
     }

@@ -1,3 +1,5 @@
+use std::f32::consts::FRAC_PI_6;
+
 use bevy::{
     prelude::*,
     render::{
@@ -38,7 +40,7 @@ impl Default for Qualities {
             speed: 6e-6,
             turn_speed: 1e-3,
             view_distance: 2e-2,
-            field_of_view: 0.523599,
+            field_of_view: FRAC_PI_6,
         }
     }
 }
@@ -124,7 +126,7 @@ fn render_extract_qualities_buffer(
         });
         if qualities.is_changed() {
             let gpu_qualities = GpuQualities::from(qualities.clone());
-            queue.write_buffer(&qualities_buffer, 0, bytemuck::bytes_of(&gpu_qualities));
+            queue.write_buffer(qualities_buffer, 0, bytemuck::bytes_of(&gpu_qualities));
         }
         qualities_components.push((id, qualities_buffer.clone()));
     }

@@ -26,7 +26,7 @@ const VIEW_DISTANCE_DELTA: f32 = 1e-4;
 const FIELD_OF_VIEW_DELTA: f32 = 1e-3;
 
 fn setup(mut commands: Commands, mut windows: Query<&mut Window>) {
-    windows.single_mut().title = format!("slime by Meyer Zinn");
+    windows.single_mut().title = "slime by Meyer Zinn".to_owned();
 
     commands.insert_resource(slime::Options {
         evaporation: 0.001,
@@ -160,7 +160,8 @@ fn draw_ui(
         }
 
         ui.separator();
-        if ui
+
+        let create = ui
             .horizontal(|ui| {
                 let name_entry = ui.text_edit_singleline(&mut ui_state.new_species_name);
                 let create_button = ui.add_enabled(
@@ -170,8 +171,9 @@ fn draw_ui(
                 (name_entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                     || create_button.clicked()
             })
-            .inner
-        {
+            .inner;
+
+        if create {
             let mut ent = commands.spawn((
                 Name::new(ui_state.new_species_name.take()),
                 slime::SpeciesBundle {

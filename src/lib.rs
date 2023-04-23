@@ -7,7 +7,6 @@ pub use sim::*;
 use bevy::{
     prelude::*,
     render::{
-        extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
     },
@@ -64,7 +63,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                custom_size: Some(Vec2::new(1024 as f32, 1024 as f32)),
+                custom_size: Some(Vec2::new(1024.0, 1024.0)),
                 ..default()
             },
             texture: primary,

@@ -13,7 +13,7 @@ use bevy::{
 use bytemuck::{Pod, Zeroable};
 use derive_more::From;
 
-#[derive(Resource, From, Copy, Clone, Default, ExtractResource)]
+#[derive(Resource, From, Clone, Default, ExtractResource)]
 pub struct Options {
     /// Configures how quickly trails evaporate over time. Should be in [0, 1].
     pub evaporation: f32,
@@ -57,7 +57,7 @@ impl From<Options> for GpuOptions {
 
 fn prepare_simulation_options(queue: Res<RenderQueue>, buffer: Res<Buffer>, options: Res<Options>) {
     if options.is_changed() {
-        let options = GpuOptions::from(*options);
+        let options = GpuOptions::from(options.clone());
         queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&options))
     }
 }

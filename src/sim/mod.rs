@@ -4,8 +4,6 @@ mod seed;
 pub mod species;
 pub mod trail;
 
-use std::thread::sleep;
-
 pub use options::*;
 pub use species::SpeciesBundle;
 
