@@ -9,7 +9,6 @@ use bevy::{
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
-        settings::WgpuLimits,
     },
     window::WindowResized,
 };
