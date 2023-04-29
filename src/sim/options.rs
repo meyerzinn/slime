@@ -17,8 +17,8 @@ use derive_more::From;
 pub struct Options {
     /// Configures how quickly trails evaporate over time. Should be in [0, 1].
     pub evaporation: f32,
-    /// Lerp between trail map and blurred map.
-    pub diffusion: f32,
+    // /// Lerp between trail map and blurred map.
+    // pub diffusion: f32,
 }
 
 #[derive(Resource, Deref)]
@@ -41,16 +41,16 @@ impl FromWorld for Buffer {
 #[repr(C)]
 struct GpuOptions {
     evaporation: f32,
-    diffusion: f32,
-    _padding: [f32; 2],
+    // diffusion: f32,
+    _padding: [u32; 3],
 }
 
 impl From<Options> for GpuOptions {
     fn from(value: Options) -> Self {
         Self {
             evaporation: value.evaporation,
-            diffusion: value.diffusion,
-            _padding: [0.0; 2],
+            // diffusion: value.diffusion,
+            _padding: [0; 3],
         }
     }
 }

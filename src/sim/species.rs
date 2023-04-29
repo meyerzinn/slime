@@ -38,8 +38,8 @@ impl Default for Qualities {
         Self {
             color: Color::WHITE,
             speed: 6e-6,
-            turn_speed: 1e-3,
-            view_distance: 2e-2,
+            turn_speed: 2.0e-3,
+            view_distance: 1.0e-2,
             field_of_view: FRAC_PI_6,
         }
     }

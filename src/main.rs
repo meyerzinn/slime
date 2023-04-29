@@ -19,63 +19,41 @@ use slime::{
 };
 
 const EVAPORATION_DELTA: f32 = 1e-4;
-const DIFFUSION_DELTA: f32 = 1e-4;
 const SPEED_DELTA: f32 = 1e-7;
 const TURN_SPEED_DELTA: f32 = 1e-5;
 const VIEW_DISTANCE_DELTA: f32 = 1e-4;
 const FIELD_OF_VIEW_DELTA: f32 = 1e-3;
+const MAX_AGENTS_PER_SPECIES: u32 = 50_000;
 
 fn setup(mut commands: Commands, mut windows: Query<&mut Window>) {
     windows.single_mut().title = "slime by Meyer Zinn".to_owned();
 
     commands.insert_resource(slime::Options {
-        evaporation: 0.001,
-        diffusion: 1.0,
+        evaporation: 0.002,
+        // diffusion: 1.0,
     });
 
-    // commands.spawn(slime::SpeciesBundle {
-    //     name: "first".to_owned().into(),
-    //     count: 10000.into(),
-    //     color: Color::WHITE.into(),
-    //     speed: (1e-5).into(),
-    //     turn_speed: (0.0005).into(),
-    //     view_distance: (0.005).into(),
-    //     ..default()
-    // });
+    commands.spawn((
+        Name::from("red"),
+        slime::SpeciesBundle {
+            num_agents: 20_000.into(),
+            qualities: Qualities {
+                color: Color::RED,
+                ..default()
+            },
+        },
+    ));
 
-    // commands.spawn(slime::SpeciesBundle {
-    //     name: "second".to_owned().into(),
-    //     count: 5000.into(),
-    //     color: Color::RED.into(),
-    //     speed: (1e-5).into(),
-    //     turn_speed: (0.00025).into(),
-    //     view_distance: (0.005).into(),
-    //     ..default()
-    // });
-
-    // commands.spawn(slime::SpeciesBundle {
-    //     name: "first".to_owned().into(),
-    //     count: 10000.into(),
-    //     color: Color::RED.into(),
-    //     speed: (5e-6).into(),
-    //     ..default()
-    // });
-    // commands.spawn(slime::species::SpeciesBundle {
-    //     name: "second".to_owned().into(),
-    //     count: 5000.into(),
-    //     color: Color::YELLOW.into(),
-    //     speed: (1e-6).into(),
-    //     view_distance: 1e-3.into(),
-    //     ..default()
-    // });
-    // commands.spawn(slime::species::SpeciesBundle {
-    //     name: "fast".to_owned().into(),
-    //     count: 5000.into(),
-    //     color: Color::GREEN.into(),
-    //     speed: (1e-5).into(),
-    //     view_distance: 1e-3.into(),
-    //     ..default()
-    // });
+    commands.spawn((
+        Name::from("blue"),
+        slime::SpeciesBundle {
+            num_agents: 20_000.into(),
+            qualities: Qualities {
+                color: Color::BLUE,
+                ..default()
+            },
+        },
+    ));
 
     commands.spawn(Camera2dBundle::default());
 }
@@ -129,7 +107,7 @@ fn draw_ui(
 
         let Options {
             mut evaporation,
-            mut diffusion,
+            // mut diffusion,
         } = options.clone();
         let mut options_changed = false;
         options_changed |= ui
@@ -142,20 +120,20 @@ fn draw_ui(
             })
             .inner;
 
-        options_changed |= ui
-            .horizontal(|ui| {
-                let ret = ui
-                    .add(egui::DragValue::new(&mut diffusion).speed(DIFFUSION_DELTA))
-                    .changed();
-                ui.label("Diffusion");
-                ret
-            })
-            .inner;
+        // options_changed |= ui
+        //     .horizontal(|ui| {
+        //         let ret = ui
+        //             .add(egui::DragValue::new(&mut diffusion).speed(DIFFUSION_DELTA))
+        //             .changed();
+        //         ui.label("Diffusion");
+        //         ret
+        //     })
+        //     .inner;
 
         if options_changed {
             *options = Options {
                 evaporation: evaporation.clamp(0.0, 1.0),
-                diffusion: diffusion.clamp(0.0, 1.0),
+                // diffusion: diffusion.clamp(0.0, 1.0),
             };
         }
 
@@ -259,7 +237,7 @@ fn draw_ui(
                     let ret = ui
                         .add(egui::Slider::new(
                             &mut num_agents,
-                            RangeInclusive::new(1, 1000000),
+                            RangeInclusive::new(1, MAX_AGENTS_PER_SPECIES),
                         ))
                         .changed();
                     ui.label("Number of Agents");

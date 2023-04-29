@@ -48,6 +48,9 @@ fn init(@builtin(local_invocation_index) local_id: u32,
 {
   seed(random_seed);
   seed(local_id);
+  seed(u32(species.color.r * 255.0));
+  seed(u32(species.color.g * 255.0));
+  seed(u32(species.color.b * 255.0));
 
   let total_kernels: u32 = num_workgroups.x * num_workgroups.y * num_workgroups.z;
   let total_agents: u32 = arrayLength(&agents);
